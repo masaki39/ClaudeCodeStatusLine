@@ -271,6 +271,7 @@ format_reset_time() {
 }
 
 sep=" ${dim}|${reset} "
+out2=""
 
 if [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
     # ---- 5-hour (current) ----
@@ -279,8 +280,8 @@ if [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
     five_hour_reset=$(format_reset_time "$five_hour_reset_iso" "time")
     five_hour_color=$(usage_color "$five_hour_pct")
 
-    out+="${sep}${white}5h${reset} ${five_hour_color}${five_hour_pct}%${reset}"
-    [ -n "$five_hour_reset" ] && out+=" ${dim}@${five_hour_reset}${reset}"
+    out2+="${white}5h${reset} ${five_hour_color}${five_hour_pct}%${reset}"
+    [ -n "$five_hour_reset" ] && out2+=" ${dim}@${five_hour_reset}${reset}"
 
     # ---- 7-day (weekly) ----
     seven_day_pct=$(echo "$usage_data" | jq -r '.seven_day.utilization // 0' | awk '{printf "%.0f", $1}')
@@ -288,8 +289,8 @@ if [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
     seven_day_reset=$(format_reset_time "$seven_day_reset_iso" "datetime")
     seven_day_color=$(usage_color "$seven_day_pct")
 
-    out+="${sep}${white}7d${reset} ${seven_day_color}${seven_day_pct}%${reset}"
-    [ -n "$seven_day_reset" ] && out+=" ${dim}@${seven_day_reset}${reset}"
+    out2+="${sep}${white}7d${reset} ${seven_day_color}${seven_day_pct}%${reset}"
+    [ -n "$seven_day_reset" ] && out2+=" ${dim}@${seven_day_reset}${reset}"
 
     # ---- Extra usage ----
     extra_enabled=$(echo "$usage_data" | jq -r '.extra_usage.is_enabled // false')
@@ -300,14 +301,18 @@ if [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
         # Validate: if values are empty or contain unexpanded variables, show simple "enabled" label
         if [ -n "$extra_used" ] && [ -n "$extra_limit" ] && [[ "$extra_used" != *'$'* ]] && [[ "$extra_limit" != *'$'* ]]; then
             extra_color=$(usage_color "$extra_pct")
-            out+="${sep}${white}extra${reset} ${extra_color}\$${extra_used}/\$${extra_limit}${reset}"
+            out2+="${sep}${white}extra${reset} ${extra_color}\$${extra_used}/\$${extra_limit}${reset}"
         else
-            out+="${sep}${white}extra${reset} ${green}enabled${reset}"
+            out2+="${sep}${white}extra${reset} ${green}enabled${reset}"
         fi
     fi
 fi
 
-# Output single line
-printf "%b" "$out"
+# Output two lines
+if [ -n "$out2" ]; then
+    printf "%b\n%b" "$out" "$out2"
+else
+    printf "%b" "$out"
+fi
 
 exit 0
