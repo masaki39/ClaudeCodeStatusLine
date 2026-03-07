@@ -1,5 +1,8 @@
 # Claude Code Status Line
 
+> [!note]
+> The only change from the original repo is making the status bar two lines.
+
 A custom status line for [Claude Code](https://claude.com/claude-code) that displays model info, token usage, rate limits, and reset times in a single compact line. It runs as an external shell command, so it does not slow down Claude Code or consume any extra tokens.
 
 ## Screenshot
