@@ -50,7 +50,7 @@ usage_color() {
 }
 
 # Resolve config directory: CLAUDE_CONFIG_DIR (set by alias) or default ~/.claude
-config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+claude_config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
 # ===== Extract data from JSON =====
 model_name=$(echo "$input" | jq -r '.model.display_name // "Claude"')
@@ -79,7 +79,7 @@ used_comma=$(format_commas $current)
 remain_comma=$(format_commas $(( size - current )))
 
 # Check reasoning effort
-settings_path="${config_dir}/settings.json"
+settings_path="${claude_config_dir}/settings.json"
 effort_level="medium"
 if [ -n "$CLAUDE_CODE_EFFORT_LEVEL" ]; then
     effort_level="$CLAUDE_CODE_EFFORT_LEVEL"
@@ -147,7 +147,7 @@ get_oauth_token() {
     fi
 
     # 3. Linux credentials file
-    local creds_file="${config_dir}/.credentials.json"
+    local creds_file="${claude_config_dir}/.credentials.json"
     if [ -f "$creds_file" ]; then
         token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
         if [ -n "$token" ] && [ "$token" != "null" ]; then
@@ -173,8 +173,8 @@ get_oauth_token() {
 }
 
 # ===== LINE 2 & 3: Usage limits with progress bars (cached) =====
-config_dir_hash=$(echo -n "$config_dir" | shasum -a 256 | cut -c1-8)
-cache_file="/tmp/claude/statusline-usage-cache-${config_dir_hash}.json"
+claude_config_dir_hash=$(echo -n "$claude_config_dir" | shasum -a 256 | cut -c1-8)
+cache_file="/tmp/claude/statusline-usage-cache-${claude_config_dir_hash}.json"
 cache_max_age=60  # seconds between API calls
 mkdir -p /tmp/claude
 
