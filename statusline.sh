@@ -79,7 +79,7 @@ used_comma=$(format_commas $current)
 remain_comma=$(format_commas $(( size - current )))
 
 # Check reasoning effort
-settings_path="${claude_config_dir}/settings.json"
+settings_path="$claude_config_dir/settings.json"
 effort_level="medium"
 if [ -n "$CLAUDE_CODE_EFFORT_LEVEL" ]; then
     effort_level="$CLAUDE_CODE_EFFORT_LEVEL"
@@ -173,7 +173,8 @@ get_oauth_token() {
 }
 
 # ===== LINE 2 & 3: Usage limits with progress bars (cached) =====
-claude_config_dir_hash=$(echo -n "$claude_config_dir" | shasum -a 256 | cut -c1-8)
+claude_config_dir_hash=$(echo -n "$claude_config_dir" | shasum -a 256 2>/dev/null || echo -n "$claude_config_dir" | sha256sum 2>/dev/null)
+claude_config_dir_hash=$(echo "$claude_config_dir_hash" | cut -c1-8)
 cache_file="/tmp/claude/statusline-usage-cache-${claude_config_dir_hash}.json"
 cache_max_age=60  # seconds between API calls
 mkdir -p /tmp/claude
@@ -194,6 +195,7 @@ fi
 
 # Fetch fresh data if cache is stale
 if $needs_refresh; then
+    touch "$cache_file"  # stampede lock: prevent parallel panes from fetching simultaneously
     token=$(get_oauth_token)
     if [ -n "$token" ] && [ "$token" != "null" ]; then
         response=$(curl -s --max-time 10 \
@@ -247,7 +249,7 @@ iso_to_epoch() {
     return 1
 }
 
-# Format ISO reset time to compact local time (PR #2: fixed for Linux/WSL)
+# Format ISO reset time to compact local time
 # Usage: format_reset_time <iso_string> <style: time|datetime|date>
 format_reset_time() {
     local iso_str="$1"
