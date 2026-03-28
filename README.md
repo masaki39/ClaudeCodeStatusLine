@@ -20,6 +20,7 @@ A custom status line for [Claude Code](https://claude.com/claude-code) that disp
 | **5h** | 5-hour rate limit usage percentage and reset time |
 | **7d** | 7-day rate limit usage percentage and reset time |
 | **Extra** | Extra usage credits spent / limit (if enabled) |
+| **Update** | Clickable link when a new version is available (checked every 24h) |
 
 Usage percentages are color-coded: green (<50%) → yellow (≥50%) → orange (≥70%) → red (≥90%).
 
@@ -33,7 +34,7 @@ Usage percentages are color-coded: green (<50%) → yellow (≥50%) → orange (
 
 ### Windows
 
-- PowerShell 7+ (for ANSI escape support)
+- PowerShell 5.1+ (included by default on Windows 10/11)
 - `git` in PATH (for branch/diff info)
 - Claude Code with OAuth authentication (Pro/Max subscription)
 
@@ -81,20 +82,45 @@ Claude Code will save the script and configure `settings.json` for you automatic
 
 2. Add the status line config to `%USERPROFILE%\.claude\settings.json`:
 
+   **PowerShell / CMD:**
    ```json
    {
      "statusLine": {
        "type": "command",
-       "command": "pwsh -NoProfile -File \"%USERPROFILE%\\.claude\\statusline.ps1\""
+       "command": "powershell -NoProfile -File \"%USERPROFILE%\\.claude\\statusline.ps1\""
      }
    }
    ```
+
+   **Git Bash / WSL bash:**
+   ```json
+   {
+     "statusLine": {
+       "type": "command",
+       "command": "powershell -NoProfile -File \"$USERPROFILE\\.claude\\statusline.ps1\""
+     }
+   }
+   ```
+
+   > **Note:** Use `%USERPROFILE%` in CMD/PowerShell or `$USERPROFILE` in bash shells. The `%VAR%` syntax does not expand in bash.
 
 3. Restart Claude Code.
 
 ## Caching
 
 Usage data from the Anthropic API is cached for 60 seconds at `/tmp/claude/statusline-usage-cache.json` to avoid excessive API calls.
+
+## Update Notifications
+
+The status line checks GitHub for new releases once every 24 hours. When a newer version is available, a second line appears below the status line showing the new version and a link to the repository. The check is cached at `/tmp/claude/statusline-version-cache.json` (or `%TEMP%\claude\...` on Windows) and fails silently if the API is unreachable or no release has been published.
+
+## How to Update
+
+When the status line shows an update is available, visit the [repository](https://github.com/daniel3303/ClaudeCodeStatusLine), copy the contents of `statusline.sh` (or `statusline.ps1` on Windows), and paste it into Claude Code with the prompt:
+
+> Use this script as my status bar
+
+Claude Code will replace the script and restart the status line automatically.
 
 ## License
 

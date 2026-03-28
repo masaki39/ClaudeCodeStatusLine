@@ -2,6 +2,7 @@
 # Single line: Model | tokens | %used | %remain | think | 5h bar @reset | 7d bar @reset | extra
 
 set -f  # disable globbing
+VERSION="1.1.0"
 
 input=$(cat)
 
@@ -49,6 +50,24 @@ usage_color() {
     fi
 }
 
+# Resolve config directory: CLAUDE_CONFIG_DIR (set by alias) or default ~/.claude
+claude_config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+
+# Return 0 (true) if $1 > $2 using semantic versioning
+version_gt() {
+    local a="${1#v}" b="${2#v}"
+    local IFS='.'
+    read -r a1 a2 a3 <<< "$a"
+    read -r b1 b2 b3 <<< "$b"
+    a1=${a1:-0}; a2=${a2:-0}; a3=${a3:-0}
+    b1=${b1:-0}; b2=${b2:-0}; b3=${b3:-0}
+    [ "$a1" -gt "$b1" ] 2>/dev/null && return 0
+    [ "$a1" -lt "$b1" ] 2>/dev/null && return 1
+    [ "$a2" -gt "$b2" ] 2>/dev/null && return 0
+    [ "$a2" -lt "$b2" ] 2>/dev/null && return 1
+    [ "$a3" -gt "$b3" ] 2>/dev/null && return 0
+    return 1
+}
 # ===== Extract data from JSON =====
 model_name=$(echo "$input" | jq -r '.model.display_name // "Claude"')
 
@@ -76,8 +95,8 @@ used_comma=$(format_commas $current)
 remain_comma=$(format_commas $(( size - current )))
 
 # Check reasoning effort
-settings_path="$HOME/.claude/settings.json"
-effort_level="high"
+settings_path="$claude_config_dir/settings.json"
+effort_level="medium"
 if [ -n "$CLAUDE_CODE_EFFORT_LEVEL" ]; then
     effort_level="$CLAUDE_CODE_EFFORT_LEVEL"
 elif [ -f "$settings_path" ]; then
@@ -108,9 +127,10 @@ out+="${orange}${used_tokens}/${total_tokens}${reset} ${dim}(${reset}${green}${p
 out+=" ${dim}|${reset} "
 out+="effort: "
 case "$effort_level" in
-    low)    out+="${dim}low${reset}" ;;
+    low)    out+="${dim}${effort_level}${reset}" ;;
     medium) out+="${orange}med${reset}" ;;
-    *)      out+="${green}high${reset}" ;;
+    max)    out+="${red}${effort_level}${reset}" ;;
+    *)      out+="${green}${effort_level}${reset}" ;;
 esac
 
 # ===== Cross-platform OAuth token resolution (from statusline.sh) =====
@@ -124,10 +144,16 @@ get_oauth_token() {
         return 0
     fi
 
-    # 2. macOS Keychain
+    # 2. macOS Keychain (Claude Code appends a SHA256 hash of CLAUDE_CONFIG_DIR to the service name)
     if command -v security >/dev/null 2>&1; then
+        local keychain_svc="Claude Code-credentials"
+        if [ -n "$CLAUDE_CONFIG_DIR" ]; then
+            local dir_hash
+            dir_hash=$(echo -n "$CLAUDE_CONFIG_DIR" | shasum -a 256 | cut -c1-8)
+            keychain_svc="Claude Code-credentials-${dir_hash}"
+        fi
         local blob
-        blob=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
+        blob=$(security find-generic-password -s "$keychain_svc" -w 2>/dev/null)
         if [ -n "$blob" ]; then
             token=$(echo "$blob" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
             if [ -n "$token" ] && [ "$token" != "null" ]; then
@@ -138,7 +164,7 @@ get_oauth_token() {
     fi
 
     # 3. Linux credentials file
-    local creds_file="${HOME}/.claude/.credentials.json"
+    local creds_file="${claude_config_dir}/.credentials.json"
     if [ -f "$creds_file" ]; then
         token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
         if [ -n "$token" ] && [ "$token" != "null" ]; then
@@ -164,26 +190,29 @@ get_oauth_token() {
 }
 
 # ===== LINE 2 & 3: Usage limits with progress bars (cached) =====
-cache_file="/tmp/claude/statusline-usage-cache.json"
+claude_config_dir_hash=$(echo -n "$claude_config_dir" | shasum -a 256 2>/dev/null || echo -n "$claude_config_dir" | sha256sum 2>/dev/null)
+claude_config_dir_hash=$(echo "$claude_config_dir_hash" | cut -c1-8)
+cache_file="/tmp/claude/statusline-usage-cache-${claude_config_dir_hash}.json"
 cache_max_age=60  # seconds between API calls
 mkdir -p /tmp/claude
 
 needs_refresh=true
 usage_data=""
 
-# Check cache
+# Check cache — shared across all Claude Code instances to avoid rate limits
 if [ -f "$cache_file" ]; then
     cache_mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null)
     now=$(date +%s)
     cache_age=$(( now - cache_mtime ))
     if [ "$cache_age" -lt "$cache_max_age" ]; then
         needs_refresh=false
-        usage_data=$(cat "$cache_file" 2>/dev/null)
     fi
+    usage_data=$(cat "$cache_file" 2>/dev/null)
 fi
 
 # Fetch fresh data if cache is stale
 if $needs_refresh; then
+    touch "$cache_file"  # stampede lock: prevent parallel panes from fetching simultaneously
     token=$(get_oauth_token)
     if [ -n "$token" ] && [ "$token" != "null" ]; then
         response=$(curl -s --max-time 10 \
@@ -193,14 +222,11 @@ if $needs_refresh; then
             -H "anthropic-beta: oauth-2025-04-20" \
             -H "User-Agent: claude-code/2.1.34" \
             "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
-        if [ -n "$response" ] && echo "$response" | jq . >/dev/null 2>&1; then
+        # Only cache valid usage responses (not error/rate-limit JSON)
+        if [ -n "$response" ] && echo "$response" | jq -e '.five_hour' >/dev/null 2>&1; then
             usage_data="$response"
             echo "$response" > "$cache_file"
         fi
-    fi
-    # Fall back to stale cache
-    if [ -z "$usage_data" ] && [ -f "$cache_file" ]; then
-        usage_data=$(cat "$cache_file" 2>/dev/null)
     fi
 fi
 
@@ -245,35 +271,40 @@ iso_to_epoch() {
 format_reset_time() {
     local iso_str="$1"
     local style="$2"
-    [ -z "$iso_str" ] || [ "$iso_str" = "null" ] && return
+    { [ -z "$iso_str" ] || [ "$iso_str" = "null" ]; } && return
 
     # Parse ISO datetime and convert to local time (cross-platform)
     local epoch
     epoch=$(iso_to_epoch "$iso_str")
     [ -z "$epoch" ] && return
 
-    # Format based on style (try BSD date first, then GNU date)
-    # BSD date uses %p (uppercase AM/PM), so convert to lowercase
+    # Format based on style
+    # Try GNU date first (Linux), then BSD date (macOS)
+    # Previous implementation piped BSD date through sed/tr, which always returned
+    # exit code 0 from the last pipe stage, preventing the GNU date fallback from
+    # ever executing on Linux.
+    local formatted=""
     case "$style" in
         time)
-            date -j -r "$epoch" +"%l:%M%p" 2>/dev/null | sed 's/^ //' | tr '[:upper:]' '[:lower:]' || \
-            date -d "@$epoch" +"%l:%M%P" 2>/dev/null | sed 's/^ //'
+            formatted=$(date -d "@$epoch" +"%H:%M" 2>/dev/null) || \
+            formatted=$(date -j -r "$epoch" +"%H:%M" 2>/dev/null)
             ;;
         datetime)
-            date -j -r "$epoch" +"%b %-d, %l:%M%p" 2>/dev/null | sed 's/  / /g; s/^ //' | tr '[:upper:]' '[:lower:]' || \
-            date -d "@$epoch" +"%b %-d, %l:%M%P" 2>/dev/null | sed 's/  / /g; s/^ //'
+            formatted=$(date -d "@$epoch" +"%b %-d, %H:%M" 2>/dev/null) || \
+            formatted=$(date -j -r "$epoch" +"%b %-d, %H:%M" 2>/dev/null)
             ;;
         *)
-            date -j -r "$epoch" +"%b %-d" 2>/dev/null | tr '[:upper:]' '[:lower:]' || \
-            date -d "@$epoch" +"%b %-d" 2>/dev/null
+            formatted=$(date -d "@$epoch" +"%b %-d" 2>/dev/null) || \
+            formatted=$(date -j -r "$epoch" +"%b %-d" 2>/dev/null)
             ;;
     esac
+    [ -n "$formatted" ] && echo "$formatted"
 }
 
 sep=" ${dim}|${reset} "
 out2=""
 
-if [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
+if [ -n "$usage_data" ] && echo "$usage_data" | jq -e '.five_hour' >/dev/null 2>&1; then
     # ---- 5-hour (current) ----
     five_hour_pct=$(echo "$usage_data" | jq -r '.five_hour.utilization // 0' | awk '{printf "%.0f", $1}')
     five_hour_reset_iso=$(echo "$usage_data" | jq -r '.five_hour.resets_at // empty')
@@ -306,13 +337,53 @@ if [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
             out2+="${sep}${white}extra${reset} ${green}enabled${reset}"
         fi
     fi
+else
+    # No valid usage data — show placeholders
+    out+="${sep}${white}5h${reset} ${dim}-${reset}"
+    out+="${sep}${white}7d${reset} ${dim}-${reset}"
+fi
+
+# ===== Update check (cached, 24h TTL) =====
+version_cache_file="/tmp/claude/statusline-version-cache.json"
+version_cache_max_age=86400  # 24 hours
+
+version_needs_refresh=true
+version_data=""
+
+if [ -f "$version_cache_file" ]; then
+    vc_mtime=$(stat -c %Y "$version_cache_file" 2>/dev/null || stat -f %m "$version_cache_file" 2>/dev/null)
+    vc_now=$(date +%s)
+    vc_age=$(( vc_now - vc_mtime ))
+    if [ "$vc_age" -lt "$version_cache_max_age" ]; then
+        version_needs_refresh=false
+    fi
+    version_data=$(cat "$version_cache_file" 2>/dev/null)
+fi
+
+if $version_needs_refresh; then
+    touch "$version_cache_file" 2>/dev/null
+    vc_response=$(curl -s --max-time 5 \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/daniel3303/ClaudeCodeStatusLine/releases/latest" 2>/dev/null)
+    if [ -n "$vc_response" ] && echo "$vc_response" | jq -e '.tag_name' >/dev/null 2>&1; then
+        version_data="$vc_response"
+        echo "$vc_response" > "$version_cache_file"
+    fi
+fi
+
+update_line=""
+if [ -n "$version_data" ]; then
+    latest_tag=$(echo "$version_data" | jq -r '.tag_name // empty')
+    if [ -n "$latest_tag" ] && version_gt "$latest_tag" "$VERSION"; then
+        update_line="\n${dim}Update available: ${latest_tag} → https://github.com/daniel3303/ClaudeCodeStatusLine${reset}"
+    fi
 fi
 
 # Output two lines
 if [ -n "$out2" ]; then
-    printf "%b\n%b" "$out" "$out2"
+    printf "%b\n%b" "$out$update_line" "$out2"
 else
-    printf "%b" "$out"
+    printf "%b" "$out$update_line"
 fi
 
 exit 0
