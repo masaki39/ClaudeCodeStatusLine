@@ -123,8 +123,6 @@ if [ -n "$cwd" ]; then
 fi
 
 out+=" ${dim}|${reset} "
-out+="${orange}${used_tokens}/${total_tokens}${reset} ${dim}(${reset}${green}${pct_used}%${reset}${dim})${reset}"
-out+=" ${dim}|${reset} "
 out+="effort: "
 case "$effort_level" in
     low)    out+="${dim}${effort_level}${reset}" ;;
@@ -317,7 +315,7 @@ format_reset_time() {
 }
 
 sep=" ${dim}|${reset} "
-out2=""
+out2="${orange}${used_tokens}/${total_tokens}${reset} ${dim}(${reset}${green}${pct_used}%${reset}${dim})${reset}"
 
 if $use_builtin; then
     # ---- Use rate_limits data provided directly by Claude Code in JSON input ----
@@ -325,7 +323,7 @@ if $use_builtin; then
     if [ -n "$builtin_five_hour_pct" ]; then
         five_hour_pct=$(printf "%.0f" "$builtin_five_hour_pct")
         five_hour_color=$(usage_color "$five_hour_pct")
-        out2+="${white}5h${reset} ${five_hour_color}${five_hour_pct}%${reset}"
+        out2+="${sep}${white}5h${reset} ${five_hour_color}${five_hour_pct}%${reset}"
         if [ -n "$builtin_five_hour_reset" ] && [ "$builtin_five_hour_reset" != "null" ]; then
             five_hour_reset=$(date -j -r "$builtin_five_hour_reset" +"%H:%M" 2>/dev/null || date -d "@$builtin_five_hour_reset" +"%H:%M" 2>/dev/null)
             [ -n "$five_hour_reset" ] && out2+=" ${dim}@${five_hour_reset}${reset}"
@@ -349,7 +347,7 @@ elif [ -n "$usage_data" ] && echo "$usage_data" | jq -e '.five_hour' >/dev/null 
     five_hour_reset=$(format_reset_time "$five_hour_reset_iso" "time")
     five_hour_color=$(usage_color "$five_hour_pct")
 
-    out2+="${white}5h${reset} ${five_hour_color}${five_hour_pct}%${reset}"
+    out2+="${sep}${white}5h${reset} ${five_hour_color}${five_hour_pct}%${reset}"
     [ -n "$five_hour_reset" ] && out2+=" ${dim}@${five_hour_reset}${reset}"
 
     # ---- 7-day (weekly) ----
@@ -377,8 +375,8 @@ elif [ -n "$usage_data" ] && echo "$usage_data" | jq -e '.five_hour' >/dev/null 
     fi
 else
     # No valid usage data — show placeholders
-    out+="${sep}${white}5h${reset} ${dim}-${reset}"
-    out+="${sep}${white}7d${reset} ${dim}-${reset}"
+    out2+="${sep}${white}5h${reset} ${dim}-${reset}"
+    out2+="${sep}${white}7d${reset} ${dim}-${reset}"
 fi
 
 # ===== Update check (cached, 24h TTL) =====
@@ -419,7 +417,7 @@ fi
 
 # Output two lines
 if [ -n "$out2" ]; then
-    printf "%b\n%b" "$out$update_line" "$out2"
+    printf "%b\n%b" "$out2" "$out$update_line"
 else
     printf "%b" "$out$update_line"
 fi
