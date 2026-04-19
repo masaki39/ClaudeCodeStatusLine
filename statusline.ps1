@@ -1,4 +1,6 @@
-$VERSION = "1.2.0"
+# Source: https://github.com/daniel3303/ClaudeCodeStatusLine
+
+$VERSION = "1.3.0"
 # Single line: Model | tokens | %used | %remain | think | 5h bar @reset | 7d bar @reset | extra
 
 # Read input from stdin
@@ -19,13 +21,18 @@ $green  = "${esc}[38;2;0;160;0m"
 $cyan   = "${esc}[38;2;46;149;153m"
 $red    = "${esc}[38;2;255;85;85m"
 $yellow = "${esc}[38;2;230;200;0m"
+$purple = "${esc}[38;2;167;139;250m"
 $white  = "${esc}[38;2;220;220;220m"
 $dim    = "${esc}[2m"
 $reset  = "${esc}[0m"
 
 # Format token counts (e.g., 50k / 200k)
 function Format-Tokens([long]$num) {
-    if ($num -ge 1000000) { return "{0:F1}m" -f ($num / 1000000) }
+    if ($num -ge 1000000) {
+        $val = [math]::Round($num / 1000000, 1)
+        if ([math]::Abs($val - [math]::Round($val)) -lt 0.05) { return "{0:F0}m" -f $val }
+        return "{0:F1}m" -f $val
+    }
     elseif ($num -ge 1000) { return "{0:F0}k" -f ($num / 1000) }
     else { return "$num" }
 }
@@ -63,6 +70,7 @@ function Test-VersionGreaterThan([string]$a, [string]$b) {
 $data = $input | ConvertFrom-Json
 
 $modelName = if ($data.model.display_name) { $data.model.display_name } else { "Claude" }
+$modelName = ($modelName -replace '\s*\((\d+\.?\d*[kKmM])\s+context\)', ' $1').Trim()  # "(1M context)" → "1M"
 
 # Context window
 $size = if ($data.context_window.context_window_size) { [long]$data.context_window.context_window_size } else { 200000 }
@@ -144,6 +152,8 @@ $out += "effort: "
 switch ($effortLevel) {
     "low"    { $out += "${dim}${effortLevel}${reset}" }
     "medium" { $out += "${orange}med${reset}" }
+    "high"   { $out += "${green}${effortLevel}${reset}" }
+    "xhigh"  { $out += "${purple}${effortLevel}${reset}" }
     "max"    { $out += "${red}${effortLevel}${reset}" }
     default  { $out += "${green}${effortLevel}${reset}" }
 }
@@ -181,7 +191,37 @@ function Get-OAuthToken {
     return $null
 }
 
-# ===== Usage limits with caching =====
+# ===== Usage limits =====
+# First, try to use rate_limits data provided directly by Claude Code in the JSON input.
+# This is the most reliable source — no OAuth token or API call required.
+$builtinFiveHourPct = $data.rate_limits.five_hour.used_percentage
+$builtinFiveHourReset = $data.rate_limits.five_hour.resets_at
+$builtinSevenDayPct = $data.rate_limits.seven_day.used_percentage
+$builtinSevenDayReset = $data.rate_limits.seven_day.resets_at
+
+$useBuiltin = ($null -ne $builtinFiveHourPct) -or ($null -ne $builtinSevenDayPct)
+
+# When builtin values are all zero AND reset timestamps are missing, it likely indicates
+# an API failure on Claude's side — fall through to cached data instead of displaying
+# misleading 0%. Genuine zero responses (after a billing reset) still include valid
+# resets_at timestamps, so we trust those.
+$effectiveBuiltin = $false
+if ($useBuiltin) {
+    # Trust builtin if any percentage is non-zero
+    if (($null -ne $builtinFiveHourPct -and [math]::Floor([double]$builtinFiveHourPct) -ne 0) -or
+        ($null -ne $builtinSevenDayPct -and [math]::Floor([double]$builtinSevenDayPct) -ne 0)) {
+        $effectiveBuiltin = $true
+    }
+    # Also trust if reset timestamps are present — genuine zero responses include valid reset times
+    if (-not $effectiveBuiltin) {
+        if (($null -ne $builtinFiveHourReset -and "$builtinFiveHourReset" -ne "null" -and "$builtinFiveHourReset" -ne "0") -or
+            ($null -ne $builtinSevenDayReset -and "$builtinSevenDayReset" -ne "null" -and "$builtinSevenDayReset" -ne "0")) {
+            $effectiveBuiltin = $true
+        }
+    }
+}
+
+# Cache setup — used as primary source for API path, and as fallback when builtin reports zero
 $cacheDir = Join-Path $env:TEMP "claude"
 $cacheFile = Join-Path $cacheDir "statusline-usage-cache.json"
 $cacheMaxAge = 60  # seconds between API calls
@@ -191,37 +231,45 @@ if (-not (Test-Path $cacheDir)) { New-Item -ItemType Directory -Path $cacheDir -
 $needsRefresh = $true
 $usageData = $null
 
-# Check cache
+# Always load cache — available as fallback regardless of data source
 if (Test-Path $cacheFile) {
     $cacheMtime = (Get-Item $cacheFile).LastWriteTime
     $cacheAge = ((Get-Date) - $cacheMtime).TotalSeconds
     if ($cacheAge -lt $cacheMaxAge) {
         $needsRefresh = $false
-        $usageData = Get-Content $cacheFile -Raw
     }
+    $usageData = Get-Content $cacheFile -Raw
 }
 
-# Fetch fresh data if cache is stale
-if ($needsRefresh) {
-    $token = Get-OAuthToken
-    if ($token) {
-        try {
-            $headers = @{
-                "Accept"         = "application/json"
-                "Content-Type"   = "application/json"
-                "Authorization"  = "Bearer $token"
-                "anthropic-beta" = "oauth-2025-04-20"
-                "User-Agent"     = "claude-code/2.1.34"
-            }
-            $response = Invoke-RestMethod -Uri "https://api.anthropic.com/api/oauth/usage" `
-                -Headers $headers -Method Get -TimeoutSec 10 -ErrorAction Stop
-            $usageData = $response | ConvertTo-Json -Depth 10
-            $usageData | Set-Content $cacheFile -Force
-        } catch {}
-    }
-    # Fall back to stale cache
-    if (-not $usageData -and (Test-Path $cacheFile)) {
-        $usageData = Get-Content $cacheFile -Raw
+if (-not $effectiveBuiltin) {
+    # Fetch fresh data if cache is stale (shared across all Claude Code instances to avoid rate limits)
+    if ($needsRefresh) {
+        # Touch cache immediately (stampede lock: prevent parallel instances from fetching simultaneously)
+        if (Test-Path $cacheFile) {
+            (Get-Item $cacheFile).LastWriteTime = Get-Date
+        } else {
+            New-Item -ItemType File -Path $cacheFile -Force | Out-Null
+        }
+        $token = Get-OAuthToken
+        if ($token) {
+            try {
+                $headers = @{
+                    "Accept"         = "application/json"
+                    "Content-Type"   = "application/json"
+                    "Authorization"  = "Bearer $token"
+                    "anthropic-beta" = "oauth-2025-04-20"
+                    "User-Agent"     = "claude-code/2.1.34"
+                }
+                $response = Invoke-RestMethod -Uri "https://api.anthropic.com/api/oauth/usage" `
+                    -Headers $headers -Method Get -TimeoutSec 10 -ErrorAction Stop
+                $usageData = $response | ConvertTo-Json -Depth 10
+                $usageData | Set-Content $cacheFile -Force
+            } catch {}
+        }
+        # Fall back to stale cache
+        if (-not $usageData -and (Test-Path $cacheFile)) {
+            $usageData = Get-Content $cacheFile -Raw
+        }
     }
 }
 
@@ -238,9 +286,62 @@ function Format-ResetTime([string]$isoStr, [string]$style) {
     } catch { return $null }
 }
 
+# Format Unix epoch reset time to compact local time
+function Format-EpochResetTime([object]$epoch, [string]$style) {
+    if ($null -eq $epoch -or "$epoch" -eq "null" -or "$epoch" -eq "") { return $null }
+    try {
+        $dt = [DateTimeOffset]::FromUnixTimeSeconds([long]$epoch).LocalDateTime
+        switch ($style) {
+            "time"     { return $dt.ToString("h:mmtt").ToLower() }
+            "datetime" { return $dt.ToString("MMM d, h:mmtt").ToLower() }
+            default    { return $dt.ToString("MMM d").ToLower() }
+        }
+    } catch { return $null }
+}
+
 $sep = " ${dim}|${reset} "
 
-if ($usageData) {
+if ($effectiveBuiltin) {
+    # ---- Use rate_limits data provided directly by Claude Code in JSON input ----
+    # resets_at values are Unix epoch integers in this source
+    if ($null -ne $builtinFiveHourPct) {
+        $fiveHourPct = [math]::Floor([double]$builtinFiveHourPct)
+        $fiveHourColor = Get-UsageColor $fiveHourPct
+        $out += "${sep}${white}5h${reset} ${fiveHourColor}${fiveHourPct}%${reset}"
+        $fiveHourReset = Format-EpochResetTime $builtinFiveHourReset "time"
+        if ($fiveHourReset) { $out += " ${dim}@${fiveHourReset}${reset}" }
+    }
+
+    if ($null -ne $builtinSevenDayPct) {
+        $sevenDayPct = [math]::Floor([double]$builtinSevenDayPct)
+        $sevenDayColor = Get-UsageColor $sevenDayPct
+        $out += "${sep}${white}7d${reset} ${sevenDayColor}${sevenDayPct}%${reset}"
+        $sevenDayReset = Format-EpochResetTime $builtinSevenDayReset "datetime"
+        if ($sevenDayReset) { $out += " ${dim}@${sevenDayReset}${reset}" }
+    }
+
+    # Cache builtin values so they're available as fallback when API is unavailable.
+    # Convert epoch resets_at to ISO 8601 for compatibility with the API-format cache parser.
+    # Use invariant culture to avoid locale-dependent decimal separators in JSON.
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $fhVal = if ($builtinFiveHourPct) { ([double]$builtinFiveHourPct).ToString($inv) } else { "0" }
+    $sdVal = if ($builtinSevenDayPct) { ([double]$builtinSevenDayPct).ToString($inv) } else { "0" }
+    $fhResetJson = "null"
+    if ($null -ne $builtinFiveHourReset -and "$builtinFiveHourReset" -ne "null" -and "$builtinFiveHourReset" -ne "0") {
+        try {
+            $fhResetJson = '"' + [DateTimeOffset]::FromUnixTimeSeconds([long]$builtinFiveHourReset).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") + '"'
+        } catch {}
+    }
+    $sdResetJson = "null"
+    if ($null -ne $builtinSevenDayReset -and "$builtinSevenDayReset" -ne "null" -and "$builtinSevenDayReset" -ne "0") {
+        try {
+            $sdResetJson = '"' + [DateTimeOffset]::FromUnixTimeSeconds([long]$builtinSevenDayReset).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") + '"'
+        } catch {}
+    }
+    $fallbackJson = "{`"five_hour`":{`"utilization`":$fhVal,`"resets_at`":$fhResetJson},`"seven_day`":{`"utilization`":$sdVal,`"resets_at`":$sdResetJson}}"
+    $fallbackJson | Set-Content $cacheFile -Force
+} elseif ($usageData) {
+    # ---- Fall back: API-fetched usage data ----
     try {
         $usage = if ($usageData -is [string]) { $usageData | ConvertFrom-Json } else { $usageData }
 

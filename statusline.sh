@@ -1,8 +1,9 @@
 #!/bin/bash
+# Source: https://github.com/daniel3303/ClaudeCodeStatusLine
 # Single line: Model | tokens | %used | %remain | think | 5h bar @reset | 7d bar @reset | extra
 
 set -f  # disable globbing
-VERSION="1.2.0"
+VERSION="1.3.0"
 
 input=$(cat)
 
@@ -18,6 +19,7 @@ green='\033[38;2;0;160;0m'
 cyan='\033[38;2;46;149;153m'
 red='\033[38;2;255;85;85m'
 yellow='\033[38;2;230;200;0m'
+purple='\033[38;2;167;139;250m'
 white='\033[38;2;220;220;220m'
 dim='\033[2m'
 reset='\033[0m'
@@ -26,7 +28,7 @@ reset='\033[0m'
 format_tokens() {
     local num=$1
     if [ "$num" -ge 1000000 ]; then
-        awk "BEGIN {printf \"%.1fm\", $num / 1000000}"
+        awk "BEGIN {v=sprintf(\"%.1f\",$num/1000000)+0; if(v==int(v)) printf \"%dm\",v; else printf \"%.1fm\",v}"
     elif [ "$num" -ge 1000 ]; then
         awk "BEGIN {printf \"%.0fk\", $num / 1000}"
     else
@@ -70,6 +72,7 @@ version_gt() {
 }
 # ===== Extract data from JSON =====
 model_name=$(echo "$input" | jq -r '.model.display_name // "Claude"')
+model_name=$(echo "$model_name" | sed 's/ *(\([0-9.]*[kKmM]*\) context)/ \1/')  # "(1M context)" → "1M"
 
 # Context window
 size=$(echo "$input" | jq -r '.context_window.context_window_size // 200000')
@@ -127,6 +130,8 @@ out+="effort: "
 case "$effort_level" in
     low)    out+="${dim}${effort_level}${reset}" ;;
     medium) out+="${orange}med${reset}" ;;
+    high)   out+="${green}${effort_level}${reset}" ;;
+    xhigh)  out+="${purple}${effort_level}${reset}" ;;
     max)    out+="${red}${effort_level}${reset}" ;;
     *)      out+="${green}${effort_level}${reset}" ;;
 esac
@@ -200,7 +205,7 @@ if [ -n "$builtin_five_hour_pct" ] || [ -n "$builtin_seven_day_pct" ]; then
     use_builtin=true
 fi
 
-# Fall back to cached API call only when Claude Code didn't supply rate_limits data
+# Cache setup — shared across all Claude Code instances to avoid rate limits
 claude_config_dir_hash=$(echo -n "$claude_config_dir" | shasum -a 256 2>/dev/null || echo -n "$claude_config_dir" | sha256sum 2>/dev/null)
 claude_config_dir_hash=$(echo "$claude_config_dir_hash" | cut -c1-8)
 cache_file="/tmp/claude/statusline-usage-cache-${claude_config_dir_hash}.json"
@@ -210,19 +215,39 @@ mkdir -p /tmp/claude
 needs_refresh=true
 usage_data=""
 
-if ! $use_builtin; then
-    # Check cache — shared across all Claude Code instances to avoid rate limits
-    if [ -f "$cache_file" ] && [ -s "$cache_file" ]; then
-        cache_mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null)
-        now=$(date +%s)
-        cache_age=$(( now - cache_mtime ))
-        if [ "$cache_age" -lt "$cache_max_age" ]; then
-            needs_refresh=false
-        fi
-        usage_data=$(cat "$cache_file" 2>/dev/null)
+# Always load cache — used as primary source for API path, and as fallback when builtin reports zero
+if [ -f "$cache_file" ] && [ -s "$cache_file" ]; then
+    cache_mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null)
+    now=$(date +%s)
+    cache_age=$(( now - cache_mtime ))
+    if [ "$cache_age" -lt "$cache_max_age" ]; then
+        needs_refresh=false
     fi
+    usage_data=$(cat "$cache_file" 2>/dev/null)
+fi
 
-    # Fetch fresh data if cache is stale
+# When builtin values are all zero AND reset timestamps are missing, it likely indicates
+# an API failure on Claude's side — fall through to cached data instead of displaying
+# misleading 0%. Genuine zero responses (after a billing reset) still include valid
+# resets_at timestamps, so we trust those.
+effective_builtin=false
+if $use_builtin; then
+    # Trust builtin if any percentage is non-zero
+    if { [ -n "$builtin_five_hour_pct" ] && [ "$(printf '%.0f' "$builtin_five_hour_pct" 2>/dev/null)" != "0" ]; } || \
+       { [ -n "$builtin_seven_day_pct" ] && [ "$(printf '%.0f' "$builtin_seven_day_pct" 2>/dev/null)" != "0" ]; }; then
+        effective_builtin=true
+    fi
+    # Also trust if reset timestamps are present — genuine zero responses include valid reset times
+    if ! $effective_builtin; then
+        if { [ -n "$builtin_five_hour_reset" ] && [ "$builtin_five_hour_reset" != "null" ] && [ "$builtin_five_hour_reset" != "0" ]; } || \
+           { [ -n "$builtin_seven_day_reset" ] && [ "$builtin_seven_day_reset" != "null" ] && [ "$builtin_seven_day_reset" != "0" ]; }; then
+            effective_builtin=true
+        fi
+    fi
+fi
+
+if ! $effective_builtin; then
+    # Fetch fresh data if cache is stale (shared across all Claude Code instances to avoid rate limits)
     if $needs_refresh; then
         touch "$cache_file"  # stampede lock: prevent parallel panes from fetching simultaneously
         token=$(get_oauth_token)
@@ -317,7 +342,7 @@ format_reset_time() {
 sep=" ${dim}|${reset} "
 out2="${orange}${used_tokens}/${total_tokens}${reset} ${dim}(${reset}${green}${pct_used}%${reset}${dim})${reset}"
 
-if $use_builtin; then
+if $effective_builtin; then
     # ---- Use rate_limits data provided directly by Claude Code in JSON input ----
     # resets_at values are Unix epoch integers in this source
     if [ -n "$builtin_five_hour_pct" ]; then
@@ -339,6 +364,24 @@ if $use_builtin; then
             [ -n "$seven_day_reset" ] && out2+=" ${dim}@${seven_day_reset}${reset}"
         fi
     fi
+
+    # Cache builtin values so they're available as fallback when API is unavailable.
+    # Convert epoch resets_at to ISO 8601 for compatibility with the API-format cache parser.
+    _fh_reset_json="null"
+    if [ -n "$builtin_five_hour_reset" ] && [ "$builtin_five_hour_reset" != "null" ] && [ "$builtin_five_hour_reset" != "0" ]; then
+        _fh_iso=$(date -u -r "$builtin_five_hour_reset" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || \
+                  date -u -d "@$builtin_five_hour_reset" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
+        [ -n "$_fh_iso" ] && _fh_reset_json="\"$_fh_iso\""
+    fi
+    _sd_reset_json="null"
+    if [ -n "$builtin_seven_day_reset" ] && [ "$builtin_seven_day_reset" != "null" ] && [ "$builtin_seven_day_reset" != "0" ]; then
+        _sd_iso=$(date -u -r "$builtin_seven_day_reset" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || \
+                  date -u -d "@$builtin_seven_day_reset" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
+        [ -n "$_sd_iso" ] && _sd_reset_json="\"$_sd_iso\""
+    fi
+    printf '{"five_hour":{"utilization":%s,"resets_at":%s},"seven_day":{"utilization":%s,"resets_at":%s}}' \
+        "${builtin_five_hour_pct:-0}" "$_fh_reset_json" \
+        "${builtin_seven_day_pct:-0}" "$_sd_reset_json" > "$cache_file" 2>/dev/null
 elif [ -n "$usage_data" ] && echo "$usage_data" | jq -e '.five_hour' >/dev/null 2>&1; then
     # ---- Fall back: API-fetched usage data ----
     # ---- 5-hour (current) ----
