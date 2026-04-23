@@ -241,35 +241,40 @@ if (Test-Path $cacheFile) {
     $usageData = Get-Content $cacheFile -Raw
 }
 
-if (-not $effectiveBuiltin) {
-    # Fetch fresh data if cache is stale (shared across all Claude Code instances to avoid rate limits)
-    if ($needsRefresh) {
-        # Touch cache immediately (stampede lock: prevent parallel instances from fetching simultaneously)
-        if (Test-Path $cacheFile) {
-            (Get-Item $cacheFile).LastWriteTime = Get-Date
-        } else {
-            New-Item -ItemType File -Path $cacheFile -Force | Out-Null
-        }
-        $token = Get-OAuthToken
-        if ($token) {
-            try {
-                $headers = @{
-                    "Accept"         = "application/json"
-                    "Content-Type"   = "application/json"
-                    "Authorization"  = "Bearer $token"
-                    "anthropic-beta" = "oauth-2025-04-20"
-                    "User-Agent"     = "claude-code/2.1.34"
-                }
-                $response = Invoke-RestMethod -Uri "https://api.anthropic.com/api/oauth/usage" `
-                    -Headers $headers -Method Get -TimeoutSec 10 -ErrorAction Stop
-                $usageData = $response | ConvertTo-Json -Depth 10
-                $usageData | Set-Content $cacheFile -Force
-            } catch {}
-        }
-        # Fall back to stale cache
-        if (-not $usageData -and (Test-Path $cacheFile)) {
-            $usageData = Get-Content $cacheFile -Raw
-        }
+# Refresh API cache when stale — runs regardless of builtin rate_limits because
+# extra_usage is only exposed through the OAuth usage endpoint (not stdin JSON).
+# Throttled to cacheMaxAge and stampede-locked via touch for shared panes.
+if ($needsRefresh) {
+    # Touch cache immediately (stampede lock: prevent parallel instances from fetching simultaneously)
+    if (Test-Path $cacheFile) {
+        (Get-Item $cacheFile).LastWriteTime = Get-Date
+    } else {
+        New-Item -ItemType File -Path $cacheFile -Force | Out-Null
+    }
+    $token = Get-OAuthToken
+    if ($token) {
+        try {
+            $headers = @{
+                "Accept"         = "application/json"
+                "Content-Type"   = "application/json"
+                "Authorization"  = "Bearer $token"
+                "anthropic-beta" = "oauth-2025-04-20"
+                "User-Agent"     = "claude-code/2.1.34"
+            }
+            $response = Invoke-RestMethod -Uri "https://api.anthropic.com/api/oauth/usage" `
+                -Headers $headers -Method Get -TimeoutSec 10 -ErrorAction Stop
+            $usageData = $response | ConvertTo-Json -Depth 10
+            $usageData | Set-Content $cacheFile -Force
+        } catch {}
+    }
+    # Fall back to stale cache
+    if (-not $usageData -and (Test-Path $cacheFile)) {
+        $usageData = Get-Content $cacheFile -Raw
+    }
+    # Remove the stampede sentinel if the fetch failed to produce valid JSON —
+    # otherwise an empty cache file would suppress retries for a full cacheMaxAge window.
+    if ((Test-Path $cacheFile) -and ((Get-Item $cacheFile).Length -eq 0)) {
+        Remove-Item $cacheFile -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -301,6 +306,39 @@ function Format-EpochResetTime([object]$epoch, [string]$style) {
 
 $sep = " ${dim}|${reset} "
 
+# Render extra_usage segment from API usage data (not available via stdin rate_limits).
+# Returns the segment string (may be empty). No-op when data is missing or is_enabled is false.
+function Format-ExtraUsage($usage) {
+    if (-not $usage) { return "" }
+    try {
+        $enabled = $usage.extra_usage.is_enabled
+        if ($enabled -ne $true) { return "" }
+
+        $pct = [math]::Floor([double](Coalesce $usage.extra_usage.utilization 0))
+        $usedRaw = $usage.extra_usage.used_credits
+        $limitRaw = $usage.extra_usage.monthly_limit
+
+        if ($null -ne $usedRaw -and $null -ne $limitRaw) {
+            $used = "{0:F2}" -f ([double]$usedRaw / 100)
+            $limit = "{0:F2}" -f ([double]$limitRaw / 100)
+            $color = Get-UsageColor $pct
+            return "${sep}${white}extra${reset} ${color}`$${used}/`$${limit}${reset}"
+        } else {
+            return "${sep}${white}extra${reset} ${green}enabled${reset}"
+        }
+    } catch {
+        return ""
+    }
+}
+
+# Parse usage_data once (used by both branches below for extra_usage)
+$parsedUsage = $null
+if ($usageData) {
+    try {
+        $parsedUsage = if ($usageData -is [string]) { $usageData | ConvertFrom-Json } else { $usageData }
+    } catch {}
+}
+
 if ($effectiveBuiltin) {
     # ---- Use rate_limits data provided directly by Claude Code in JSON input ----
     # resets_at values are Unix epoch integers in this source
@@ -320,9 +358,13 @@ if ($effectiveBuiltin) {
         if ($sevenDayReset) { $out += " ${dim}@${sevenDayReset}${reset}" }
     }
 
+    # Render extra_usage from API cache (stdin rate_limits doesn't expose it)
+    $out += Format-ExtraUsage $parsedUsage
+
     # Cache builtin values so they're available as fallback when API is unavailable.
     # Convert epoch resets_at to ISO 8601 for compatibility with the API-format cache parser.
     # Use invariant culture to avoid locale-dependent decimal separators in JSON.
+    # Preserve extra_usage from prior API response so we don't clobber it.
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
     $fhVal = if ($builtinFiveHourPct) { ([double]$builtinFiveHourPct).ToString($inv) } else { "0" }
     $sdVal = if ($builtinSevenDayPct) { ([double]$builtinSevenDayPct).ToString($inv) } else { "0" }
@@ -338,16 +380,20 @@ if ($effectiveBuiltin) {
             $sdResetJson = '"' + [DateTimeOffset]::FromUnixTimeSeconds([long]$builtinSevenDayReset).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") + '"'
         } catch {}
     }
-    $fallbackJson = "{`"five_hour`":{`"utilization`":$fhVal,`"resets_at`":$fhResetJson},`"seven_day`":{`"utilization`":$sdVal,`"resets_at`":$sdResetJson}}"
+    $extraJson = "null"
+    if ($parsedUsage -and $parsedUsage.extra_usage) {
+        try {
+            $extraJson = $parsedUsage.extra_usage | ConvertTo-Json -Depth 5 -Compress
+        } catch {}
+    }
+    $fallbackJson = "{`"five_hour`":{`"utilization`":$fhVal,`"resets_at`":$fhResetJson},`"seven_day`":{`"utilization`":$sdVal,`"resets_at`":$sdResetJson},`"extra_usage`":$extraJson}"
     $fallbackJson | Set-Content $cacheFile -Force
-} elseif ($usageData) {
+} elseif ($parsedUsage) {
     # ---- Fall back: API-fetched usage data ----
     try {
-        $usage = if ($usageData -is [string]) { $usageData | ConvertFrom-Json } else { $usageData }
-
         # ---- 5-hour (current) ----
-        $fiveHourPct = [math]::Floor([double](Coalesce $usage.five_hour.utilization 0))
-        $fiveHourResetIso = $usage.five_hour.resets_at
+        $fiveHourPct = [math]::Floor([double](Coalesce $parsedUsage.five_hour.utilization 0))
+        $fiveHourResetIso = $parsedUsage.five_hour.resets_at
         $fiveHourReset = Format-ResetTime $fiveHourResetIso "time"
         $fiveHourColor = Get-UsageColor $fiveHourPct
 
@@ -355,30 +401,15 @@ if ($effectiveBuiltin) {
         if ($fiveHourReset) { $out += " ${dim}@${fiveHourReset}${reset}" }
 
         # ---- 7-day (weekly) ----
-        $sevenDayPct = [math]::Floor([double](Coalesce $usage.seven_day.utilization 0))
-        $sevenDayResetIso = $usage.seven_day.resets_at
+        $sevenDayPct = [math]::Floor([double](Coalesce $parsedUsage.seven_day.utilization 0))
+        $sevenDayResetIso = $parsedUsage.seven_day.resets_at
         $sevenDayReset = Format-ResetTime $sevenDayResetIso "datetime"
         $sevenDayColor = Get-UsageColor $sevenDayPct
 
         $out += "${sep}${white}7d${reset} ${sevenDayColor}${sevenDayPct}%${reset}"
         if ($sevenDayReset) { $out += " ${dim}@${sevenDayReset}${reset}" }
 
-        # ---- Extra usage ----
-        $extraEnabled = $usage.extra_usage.is_enabled
-        if ($extraEnabled -eq $true) {
-            $extraPct = [math]::Floor([double](Coalesce $usage.extra_usage.utilization 0))
-            $extraUsedRaw = $usage.extra_usage.used_credits
-            $extraLimitRaw = $usage.extra_usage.monthly_limit
-
-            if ($null -ne $extraUsedRaw -and $null -ne $extraLimitRaw) {
-                $extraUsed = "{0:F2}" -f ([double]$extraUsedRaw / 100)
-                $extraLimit = "{0:F2}" -f ([double]$extraLimitRaw / 100)
-                $extraColor = Get-UsageColor $extraPct
-                $out += "${sep}${white}extra${reset} ${extraColor}`$${extraUsed}/`$${extraLimit}${reset}"
-            } else {
-                $out += "${sep}${white}extra${reset} ${green}enabled${reset}"
-            }
-        }
+        $out += Format-ExtraUsage $parsedUsage
     } catch {}
 }
 
