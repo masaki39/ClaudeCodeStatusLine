@@ -13,114 +13,55 @@ A custom status line for [Claude Code](https://claude.com/claude-code) that disp
 
 | Segment | Description |
 |---------|-------------|
-| **Model** | Current model name (e.g., Opus 4.6) |
+| **Model** | Current model name (e.g., Opus 4.7) |
 | **CWD@Branch** | Current folder name, git branch, and file changes (+/-) |
 | **Tokens** | Used / total context window tokens (% used) |
-| **Effort** | Reasoning effort level (low, med, high) |
+| **Effort** | Reasoning effort level (low, med, high, xhigh) |
 | **5h** | 5-hour rate limit usage percentage and reset time |
 | **7d** | 7-day rate limit usage percentage and reset time |
 | **Extra** | Extra usage credits spent / limit (if enabled) |
-| **Update** | Clickable link when a new version is available (checked every 24h) |
+| **Update** | Appears when a new version is available (checked every 24h) |
 
 Usage percentages are color-coded: green (<50%) → yellow (≥50%) → orange (≥70%) → red (≥90%).
 
-## Requirements
-
-### macOS / Linux
-
-- `jq` — for JSON parsing
-- `curl` — for fetching usage data from the Anthropic API
-- Claude Code with OAuth authentication (Pro/Max subscription)
-
-### Windows
-
-- PowerShell 5.1+ (included by default on Windows 10/11)
-- `git` in PATH (for branch/diff info)
-- Claude Code with OAuth authentication (Pro/Max subscription)
-
 ## Installation
 
-### Quick setup (recommended)
+Ask Claude Code:
 
-Copy the contents of `statusline.sh` (or `statusline.ps1` on Windows) and paste it into Claude Code with the prompt:
+> Clone https://github.com/daniel3303/ClaudeCodeStatusLine to `~/.claude/statusline/` (or `%USERPROFILE%\.claude\statusline\` on Windows) and configure it as my status bar by following its INSTALL.md.
 
-> Use this script as my status bar
+Claude will clone the repo to that path, pick the right script for your OS, and update `settings.json`. Full step-by-step instructions Claude follows live in [INSTALL.md](INSTALL.md).
 
-Claude Code will save the script and configure `settings.json` for you automatically.
+Restart Claude Code after Claude saves the configuration.
 
-### Manual setup — macOS / Linux
+### Updating
 
-1. Copy the script to your Claude config directory:
+When the status line shows a new release is available, ask Claude:
 
-   ```bash
-   cp statusline.sh ~/.claude/statusline.sh
-   chmod +x ~/.claude/statusline.sh
-   ```
+> Find my installed status bar and update it.
 
-2. Add the status line config to `~/.claude/settings.json`:
+Or update it yourself:
 
-   ```json
-   {
-     "statusLine": {
-       "type": "command",
-       "command": "~/.claude/statusline.sh"
-     }
-   }
-   ```
+```bash
+git -C ~/.claude/statusline pull
+```
 
-3. Restart Claude Code.
+No `settings.json` changes are needed — the path stays valid across versions.
 
-### Manual setup — Windows
+## Requirements
 
-> **Windows users should use `statusline.ps1`** instead of the bash script.
-
-1. Copy the script to your Claude config directory:
-
-   ```powershell
-   Copy-Item statusline.ps1 "$env:USERPROFILE\.claude\statusline.ps1"
-   ```
-
-2. Add the status line config to `%USERPROFILE%\.claude\settings.json`:
-
-   **PowerShell / CMD:**
-   ```json
-   {
-     "statusLine": {
-       "type": "command",
-       "command": "powershell -NoProfile -File \"%USERPROFILE%\\.claude\\statusline.ps1\""
-     }
-   }
-   ```
-
-   **Git Bash / WSL bash:**
-   ```json
-   {
-     "statusLine": {
-       "type": "command",
-       "command": "powershell -NoProfile -File \"$USERPROFILE\\.claude\\statusline.ps1\""
-     }
-   }
-   ```
-
-   > **Note:** Use `%USERPROFILE%` in CMD/PowerShell or `$USERPROFILE` in bash shells. The `%VAR%` syntax does not expand in bash.
-
-3. Restart Claude Code.
+- Claude Code with OAuth authentication (Pro/Max subscription for rate-limit and extra-usage data)
+- `git` in `PATH`
+- macOS / Linux: `jq` and `curl`
+- Windows: PowerShell 5.1+ (default on Windows 10/11)
 
 ## Caching
 
-Usage data from the Anthropic API is cached for 60 seconds at `/tmp/claude/statusline-usage-cache.json` to avoid excessive API calls.
+Usage data from the Anthropic API is cached for 60 seconds at `/tmp/claude/statusline-usage-cache-<hash>.json` (or `%TEMP%\claude\...` on Windows). Release checks are cached for 24 hours. Both caches are shared across concurrent Claude Code instances to avoid rate limits.
 
 ## Update Notifications
 
-The status line checks GitHub for new releases once every 24 hours. When a newer version is available, a second line appears below the status line showing the new version and a link to the repository. The check is cached at `/tmp/claude/statusline-version-cache.json` (or `%TEMP%\claude\...` on Windows) and fails silently if the API is unreachable or no release has been published.
-
-## How to Update
-
-When the status line shows an update is available, visit the [repository](https://github.com/daniel3303/ClaudeCodeStatusLine), copy the contents of `statusline.sh` (or `statusline.ps1` on Windows), and paste it into Claude Code with the prompt:
-
-> Use this script as my status bar
-
-Claude Code will replace the script and restart the status line automatically.
+The status line checks GitHub for new releases once every 24 hours. When a newer version is available, a second line appears below the status line. The check fails silently if the API is unreachable.
 
 ## License
 
