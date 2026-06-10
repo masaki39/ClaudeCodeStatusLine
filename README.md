@@ -61,7 +61,13 @@ Usage data from the Anthropic API is cached for 60 seconds at `/tmp/claude/statu
 
 ## Update Notifications
 
-The status line checks GitHub for new releases once every 24 hours. When a newer version is available, a second line appears below the status line. The check fails silently if the API is unreachable.
+The status line checks GitHub for new releases once every 24 hours via an outbound HTTP request to `api.github.com`. When a newer version is available, a second line appears below the status line. The check fails silently if the API is unreachable.
+
+To disable the update check entirely (no network calls):
+
+```bash
+export STATUSLINE_CHECK_UPDATES=false
+```
 
 ## License
 

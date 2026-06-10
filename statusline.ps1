@@ -1,6 +1,6 @@
 # Source: https://github.com/daniel3303/ClaudeCodeStatusLine
 
-$VERSION = "1.4.2"
+$VERSION = "1.4.4"
 # Single line: Model | tokens | %used | %remain | think | 5h bar @reset | 7d bar @reset | extra
 
 # Read input from stdin
@@ -98,9 +98,10 @@ $remainComma = Format-Commas ($size - $current)
 # Config directory (respects CLAUDE_CONFIG_DIR override)
 $claudeConfigDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE ".claude" }
 
-# Check reasoning effort
-$effortLevel = "medium"
-if ($env:CLAUDE_CODE_EFFORT_LEVEL) {
+$effortLevel = $null
+if ($data.effort.level) {
+    $effortLevel = [string]$data.effort.level
+} elseif ($env:CLAUDE_CODE_EFFORT_LEVEL) {
     $effortLevel = $env:CLAUDE_CODE_EFFORT_LEVEL
 } else {
     $settingsPath = Join-Path $claudeConfigDir "settings.json"
@@ -110,6 +111,34 @@ if ($env:CLAUDE_CODE_EFFORT_LEVEL) {
             if ($settings.effortLevel) { $effortLevel = $settings.effortLevel }
         } catch {}
     }
+}
+if (-not $effortLevel) { $effortLevel = "medium" }
+
+# ===== Claude CLI version (cached, 1h TTL) =====
+$cacheDir = Join-Path $env:TEMP "claude"
+$cliVersionCache = Join-Path $cacheDir "statusline-cli-version"
+$cliVersion = $null
+$cliVersionMaxAge = 3600
+
+if (Test-Path $cliVersionCache) {
+    $cvMtime = (Get-Item $cliVersionCache).LastWriteTime
+    $cvAge = ((Get-Date) - $cvMtime).TotalSeconds
+    if ($cvAge -lt $cliVersionMaxAge) {
+        $cliVersion = (Get-Content $cliVersionCache -Raw).Trim()
+    }
+}
+
+if (-not $cliVersion) {
+    try {
+        $cvOutput = & claude --version 2>$null
+        if ($cvOutput) {
+            $cliVersion = ($cvOutput -split '\s')[0]
+            if ($cliVersion) {
+                if (-not (Test-Path $cacheDir)) { New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null }
+                $cliVersion | Set-Content $cliVersionCache -Force
+            }
+        }
+    } catch {}
 }
 
 # ===== Build single-line output =====
@@ -285,7 +314,7 @@ function Format-ResetTime([string]$isoStr, [string]$style) {
         $dt = [DateTimeOffset]::Parse($isoStr).LocalDateTime
         switch ($style) {
             "time"     { return $dt.ToString("h:mmtt").ToLower() }
-            "datetime" { return $dt.ToString("MMM d, h:mmtt").ToLower() }
+            "datetime" { return $dt.ToString("ddd MMM d, h:mmtt").ToLower() }
             default    { return $dt.ToString("MMM d").ToLower() }
         }
     } catch { return $null }
@@ -298,7 +327,7 @@ function Format-EpochResetTime([object]$epoch, [string]$style) {
         $dt = [DateTimeOffset]::FromUnixTimeSeconds([long]$epoch).LocalDateTime
         switch ($style) {
             "time"     { return $dt.ToString("h:mmtt").ToLower() }
-            "datetime" { return $dt.ToString("MMM d, h:mmtt").ToLower() }
+            "datetime" { return $dt.ToString("ddd MMM d, h:mmtt").ToLower() }
             default    { return $dt.ToString("MMM d").ToLower() }
         }
     } catch { return $null }
@@ -414,52 +443,56 @@ if ($effectiveBuiltin) {
 }
 
 # ===== Update check (cached, 24h TTL) =====
-$versionCacheFile = Join-Path $cacheDir "statusline-version-cache.json"
-$versionCacheMaxAge = 86400  # 24 hours
-
-$versionNeedsRefresh = $true
-$versionData = $null
-
-if (Test-Path $versionCacheFile) {
-    $vcMtime = (Get-Item $versionCacheFile).LastWriteTime
-    $vcAge = ((Get-Date) - $vcMtime).TotalSeconds
-    if ($vcAge -lt $versionCacheMaxAge) {
-        $versionNeedsRefresh = $false
-    }
-    $versionData = Get-Content $versionCacheFile -Raw
-}
-
-if ($versionNeedsRefresh) {
-    # Touch cache immediately (thundering herd protection)
-    if (Test-Path $versionCacheFile) {
-        (Get-Item $versionCacheFile).LastWriteTime = Get-Date
-    } else {
-        New-Item -ItemType File -Path $versionCacheFile -Force | Out-Null
-    }
-    try {
-        $vcResponse = Invoke-RestMethod -Uri "https://api.github.com/repos/daniel3303/ClaudeCodeStatusLine/releases/latest" `
-            -Headers @{ "Accept" = "application/vnd.github+json" } -Method Get -TimeoutSec 5 -ErrorAction Stop
-        $versionData = $vcResponse | ConvertTo-Json -Depth 10
-        $versionData | Set-Content $versionCacheFile -Force
-    } catch {
-        # Fetch failed — if the cache has no usable content, drop the empty
-        # stampede lock so the next render retries instead of the fresh mtime
-        # suppressing update checks for the full 24h TTL.
-        if ((Test-Path $versionCacheFile) -and (Get-Item $versionCacheFile).Length -eq 0) {
-            Remove-Item $versionCacheFile -Force -ErrorAction SilentlyContinue
-        }
-    }
-}
-
+# Set STATUSLINE_CHECK_UPDATES=false to disable the update check (no network calls).
 $updateLine = ""
-if ($versionData) {
-    try {
-        $vcParsed = if ($versionData -is [string]) { $versionData | ConvertFrom-Json } else { $versionData }
-        $latestTag = $vcParsed.tag_name
-        if ($latestTag -and (Test-VersionGreaterThan $latestTag $VERSION)) {
-            $updateLine = "`n${dim}Update available: ${latestTag} → Tell Claude: `"Find my installed status bar and update it`"${reset}"
+if ($env:STATUSLINE_CHECK_UPDATES -ne "false") {
+    $versionCacheFile = Join-Path $cacheDir "statusline-version-cache.json"
+    $versionCacheMaxAge = 86400  # 24 hours
+
+    $versionNeedsRefresh = $true
+    $versionData = $null
+
+    if (Test-Path $versionCacheFile) {
+        $vcMtime = (Get-Item $versionCacheFile).LastWriteTime
+        $vcAge = ((Get-Date) - $vcMtime).TotalSeconds
+        if ($vcAge -lt $versionCacheMaxAge) {
+            $versionNeedsRefresh = $false
         }
-    } catch {}
+        $versionData = Get-Content $versionCacheFile -Raw
+    }
+
+    if ($versionNeedsRefresh) {
+        if (Test-Path $versionCacheFile) {
+            (Get-Item $versionCacheFile).LastWriteTime = Get-Date
+        } else {
+            New-Item -ItemType File -Path $versionCacheFile -Force | Out-Null
+        }
+        try {
+            $vcResponse = Invoke-RestMethod -Uri "https://api.github.com/repos/daniel3303/ClaudeCodeStatusLine/releases/latest" `
+                -Headers @{ "Accept" = "application/vnd.github+json" } -Method Get -TimeoutSec 5 -ErrorAction Stop
+            $versionData = $vcResponse | ConvertTo-Json -Depth 10
+            $versionData | Set-Content $versionCacheFile -Force
+        } catch {
+            if ((Test-Path $versionCacheFile) -and (Get-Item $versionCacheFile).Length -eq 0) {
+                Remove-Item $versionCacheFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    if ($versionData) {
+        try {
+            $vcParsed = if ($versionData -is [string]) { $versionData | ConvertFrom-Json } else { $versionData }
+            $latestTag = $vcParsed.tag_name
+            if ($latestTag -and (Test-VersionGreaterThan $latestTag $VERSION)) {
+                $updateLine = "`n${dim}Update available: ${latestTag} → Tell Claude: `"Find my installed status bar and update it`"${reset}"
+            }
+        } catch {}
+    }
+}
+
+# Append CLI version as last segment
+if ($cliVersion) {
+    $out += " ${dim}|${reset} ${orange}v${cliVersion}${reset}"
 }
 
 # Output
