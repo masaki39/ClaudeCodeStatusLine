@@ -1,7 +1,7 @@
 # Claude Code Status Line
 
-> [!note]
-> The only change from the original repo is making the status bar two lines.
+> [!NOTE]
+> **This is a fork** of [daniel3303/ClaudeCodeStatusLine](https://github.com/daniel3303/ClaudeCodeStatusLine) with extra changes — see [Fork changes](#fork-changes).
 
 A custom status line for [Claude Code](https://claude.com/claude-code) that displays model info, token usage, rate limits, and reset times in a single compact line. It runs as an external shell command, so it does not slow down Claude Code or consume any extra tokens.
 
@@ -80,3 +80,14 @@ Daniel Oliveira
 [![Website](https://img.shields.io/badge/Website-FF6B6B?style=for-the-badge&logo=safari&logoColor=white)](https://danielapoliveira.com/)
 [![X](https://img.shields.io/badge/X-000000?style=for-the-badge&logo=x&logoColor=white)](https://x.com/daniel_not_nerd)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/daniel-ap-oliveira/)
+
+## Fork changes
+
+Changes this fork adds on top of upstream:
+
+- **Multi-line layout** — the status bar is split across multiple lines.
+- **Claude Code mascot** (`mascot.sh`) — an optional ASCII logo shown on the left across three rows:
+  - **Color** reflects the highest usage among tokens / 5h / 7d (green → yellow → orange → red).
+  - **Pose** reacts to events (update available, high usage).
+  - **Rows**: row 1 = ctx / 5h / 7d mini gauges, row 2 = usage numbers, row 3 = model / dir / effort.
+  - Toggle off with `STATUSLINE_MASCOT=false`.

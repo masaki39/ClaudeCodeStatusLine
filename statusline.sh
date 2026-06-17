@@ -513,8 +513,12 @@ if [ -n "$cli_version" ]; then
     out+=" ${dim}|${reset} ${orange}v${cli_version}${reset}"
 fi
 
-# Output two lines
-if [ -n "$out2" ]; then
+# Output (fork: optional mascot prefix; falls back to the original two lines)
+_mascot="$(dirname "$0")/mascot.sh"
+if [ "${STATUSLINE_MASCOT:-true}" != "false" ] && [ -f "$_mascot" ]; then
+    . "$_mascot"
+    render_with_mascot
+elif [ -n "$out2" ]; then
     printf "%b\n%b" "$out2" "$out$update_line"
 else
     printf "%b" "$out$update_line"
